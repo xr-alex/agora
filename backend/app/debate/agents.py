@@ -1,3 +1,5 @@
+import asyncio
+from typing import Optional
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.config import settings
@@ -31,27 +33,43 @@ Given arguments from both sides:
 Be concise and fair."""
 
 
-async def run_pro_agent(question: str) -> str:
+async def _stream_agent(
+    role: str,
+    messages: list,
+    queue: Optional[asyncio.Queue],
+) -> str:
     llm = get_llm()
-    response = await llm.ainvoke([
+    full_response = ""
+    async for chunk in llm.astream(messages):
+        token = str(chunk.content)
+        if token:
+            full_response += token
+            if queue:
+                await queue.put({"type": "token", "role": role, "content": token})
+    return full_response
+
+
+async def run_pro_agent(question: str, queue: Optional[asyncio.Queue] = None) -> str:
+    return await _stream_agent("pro", [
         SystemMessage(content=_PRO_SYSTEM),
         HumanMessage(content=f"Proposition: {question}\n\nMake your case."),
-    ])
-    return str(response.content)
+    ], queue)
 
 
-async def run_con_agent(question: str) -> str:
-    llm = get_llm()
-    response = await llm.ainvoke([
+async def run_con_agent(question: str, queue: Optional[asyncio.Queue] = None) -> str:
+    return await _stream_agent("con", [
         SystemMessage(content=_CON_SYSTEM),
         HumanMessage(content=f"Proposition: {question}\n\nMake your case."),
-    ])
-    return str(response.content)
+    ], queue)
 
 
-async def run_judge_agent(question: str, pro: str, con: str) -> str:
-    llm = get_llm()
-    response = await llm.ainvoke([
+async def run_judge_agent(
+    question: str,
+    pro: str,
+    con: str,
+    queue: Optional[asyncio.Queue] = None,
+) -> str:
+    return await _stream_agent("judge", [
         SystemMessage(content=_JUDGE_SYSTEM),
         HumanMessage(content=(
             f"Proposition: {question}\n\n"
@@ -59,5 +77,4 @@ async def run_judge_agent(question: str, pro: str, con: str) -> str:
             f"CON ARGUMENT:\n{con}\n\n"
             "Evaluate and deliver your verdict."
         )),
-    ])
-    return str(response.content)
+    ], queue)

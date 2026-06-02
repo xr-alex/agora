@@ -1,14 +1,10 @@
 import { useEffect, useState } from 'react'
-import { supabase } from '../lib/supabase'
 import AgentCard from './AgentCard'
 
-interface DebateTurn {
-  id: string
-  debate_id: string
-  role: 'pro' | 'con' | 'judge'
-  content: string
-  created_at: string
-}
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+
+type Role = 'pro' | 'con' | 'judge'
+type Status = 'running' | 'completed' | 'failed'
 
 interface Props {
   debateId: string
@@ -17,55 +13,40 @@ interface Props {
 }
 
 export default function DebateView({ debateId, question, onReset }: Props) {
-  const [turns, setTurns] = useState<DebateTurn[]>([])
-  const [status, setStatus] = useState<'running' | 'completed' | 'failed'>('running')
+  const [content, setContent] = useState<Record<Role, string>>({ pro: '', con: '', judge: '' })
+  const [status, setStatus] = useState<Status>('running')
 
   useEffect(() => {
-    // Load any turns that already exist (handles page refresh mid-debate)
-    supabase
-      .from('debate_turns')
-      .select('*')
-      .eq('debate_id', debateId)
-      .order('created_at')
-      .then(({ data }) => { if (data) setTurns(data as DebateTurn[]) })
+    const es = new EventSource(`${API_URL}/debates/${debateId}/stream`)
 
-    // Live: new turns arriving
-    const turnsChannel = supabase
-      .channel(`turns:${debateId}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'debate_turns',
-        filter: `debate_id=eq.${debateId}`,
-      }, (payload) => {
-        setTurns((prev) => [...prev, payload.new as DebateTurn])
-      })
-      .subscribe()
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data)
 
-    // Live: debate status updates (running → completed/failed)
-    const statusChannel = supabase
-      .channel(`debate:${debateId}`)
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'debates',
-        filter: `id=eq.${debateId}`,
-      }, (payload) => {
-        setStatus(payload.new.status)
-      })
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(turnsChannel)
-      supabase.removeChannel(statusChannel)
+      if (data.type === 'token' || data.type === 'full_turn') {
+        setContent((prev) => ({
+          ...prev,
+          [data.role]: prev[data.role as Role] + data.content,
+        }))
+      } else if (data.type === 'debate_done') {
+        setStatus('completed')
+        es.close()
+      } else if (data.type === 'error') {
+        setStatus('failed')
+        es.close()
+      }
     }
+
+    es.onerror = () => {
+      setStatus('failed')
+      es.close()
+    }
+
+    return () => es.close()
   }, [debateId])
 
-  const pro = turns.find((t) => t.role === 'pro') ?? null
-  const con = turns.find((t) => t.role === 'con') ?? null
-  const judge = turns.find((t) => t.role === 'judge') ?? null
+  const isRunning = status === 'running'
 
-  const statusColors = {
+  const statusColors: Record<Status, string> = {
     running: 'bg-yellow-100 text-yellow-700',
     completed: 'bg-green-100 text-green-700',
     failed: 'bg-red-100 text-red-700',
@@ -89,11 +70,11 @@ export default function DebateView({ debateId, question, onReset }: Props) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <AgentCard role="pro" content={pro?.content ?? null} isLoading={!pro && status === 'running'} />
-        <AgentCard role="con" content={con?.content ?? null} isLoading={!con && status === 'running'} />
+        <AgentCard role="pro" content={content.pro || null} isLoading={isRunning && !content.pro} />
+        <AgentCard role="con" content={content.con || null} isLoading={isRunning && !content.con} />
       </div>
 
-      <AgentCard role="judge" content={judge?.content ?? null} isLoading={!judge && status === 'running'} />
+      <AgentCard role="judge" content={content.judge || null} isLoading={isRunning && !content.judge} />
     </div>
   )
 }
